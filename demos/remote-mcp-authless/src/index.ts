@@ -28,8 +28,9 @@ async function oddsPapi(
 
 	if (!response.ok) {
 		const error = await response.text();
+
 		throw new Error(
-			`OddsPapi ${response.status}: ${error.slice(0, 500)}`
+			`OddsPapi ${response.status}: ${error.slice(0, 500)}`,
 		);
 	}
 
@@ -53,7 +54,9 @@ function createServer(env: Env) {
 		version: "1.0.0",
 	});
 
-	// 1. Vérifie que OddsPapi fonctionne
+	/*
+	 * TEST ODDS PAPI
+	 */
 	server.registerTool(
 		"test_oddspapi",
 		{
@@ -73,22 +76,34 @@ function createServer(env: Env) {
 		},
 	);
 
-	// 2. Cherche les événements réellement disponibles chez Winamax
+	/*
+	 * RECHERCHE DES EVENEMENTS WINAMAX
+	 */
 	server.registerTool(
 		"search_winamax_events",
 		{
 			description:
-				"Recherche les événements sportifs pré-match ayant des cotes disponibles chez Winamax France.",
+				"Recherche les événements sportifs pré-match disposant de cotes chez Winamax France.",
+
 			inputSchema: z.object({
-				from: z.string().describe(
-					"Date/heure ISO UTC de début, ex: 2026-09-23T08:00:00Z"
-				),
-				to: z.string().describe(
-					"Date/heure ISO UTC de fin. Fenêtre inférieure à 48h."
-				),
-				sportId: z.number().optional().describe(
-					"Identifiant OddsPapi du sport. Facultatif."
-				),
+				from: z
+					.string()
+					.describe(
+						"Date/heure ISO UTC de début, par exemple 2026-09-23T08:00:00Z",
+					),
+
+				to: z
+					.string()
+					.describe(
+						"Date/heure ISO UTC de fin. Utiliser une fenêtre inférieure à 48 heures.",
+					),
+
+				sportId: z
+					.number()
+					.optional()
+					.describe(
+						"Identifiant OddsPapi du sport. Facultatif.",
+					),
 			}),
 		},
 		async ({ from, to, sportId }) => {
@@ -105,76 +120,116 @@ function createServer(env: Env) {
 				params.sportId = String(sportId);
 			}
 
-			const data = await oddsPapi(env, "fixtures", params);
+			const data = await oddsPapi(
+				env,
+				"fixtures",
+				params,
+			);
 
 			return asText(data);
 		},
 	);
 
-	// 3. Récupère les cotes Winamax d'un événement
+	/*
+	 * COTES WINAMAX
+	 */
 	server.registerTool(
 		"get_winamax_odds",
 		{
 			description:
-				"Récupère les marchés et cotes actuelles Winamax France d'un événement OddsPapi.",
+				"Récupère les marchés et les cotes actuelles Winamax France pour un événement OddsPapi.",
+
 			inputSchema: z.object({
-				fixtureId: z.string(),
+				fixtureId: z
+					.string()
+					.describe(
+						"Identifiant OddsPapi de l'événement.",
+					),
 			}),
 		},
 		async ({ fixtureId }) => {
-			const data = await oddsPapi(env, "odds", {
-				fixtureId,
-				bookmakers: "winamax.fr",
-				oddsFormat: "decimal",
-				language: "en",
-				verbosity: "3",
-			});
+			const data = await oddsPapi(
+				env,
+				"odds",
+				{
+					fixtureId,
+					bookmakers: "winamax.fr",
+					oddsFormat: "decimal",
+					language: "en",
+					verbosity: "3",
+				},
+			);
 
 			return asText(data);
 		},
 	);
 
-	// 4. Informations détaillées sur un événement
+	/*
+	 * DETAILS D'UN EVENEMENT
+	 */
 	server.registerTool(
 		"get_fixture",
 		{
 			description:
-				"Récupère les informations détaillées d'un événement sportif.",
+				"Récupère les informations détaillées concernant un événement sportif OddsPapi.",
+
 			inputSchema: z.object({
-				fixtureId: z.string(),
+				fixtureId: z
+					.string()
+					.describe(
+						"Identifiant OddsPapi de l'événement.",
+					),
 			}),
 		},
 		async ({ fixtureId }) => {
-			const data = await oddsPapi(env, "fixture", {
-				fixtureId,
-				language: "en",
-			});
+			const data = await oddsPapi(
+				env,
+				"fixture",
+				{
+					fixtureId,
+					language: "en",
+				},
+			);
 
 			return asText(data);
 		},
 	);
 
-	// 5. Historique Winamax + bookmakers de référence
+	/*
+	 * HISTORIQUE DES COTES / RLM
+	 */
 	server.registerTool(
 		"get_odds_history",
 		{
 			description:
-				"Récupère l'historique des mouvements de cotes pour analyser line movement et RLM.",
+				"Récupère l'historique des mouvements de cotes afin d'analyser le line movement et les éventuels signaux RLM.",
+
 			inputSchema: z.object({
-				fixtureId: z.string(),
+				fixtureId: z
+					.string()
+					.describe(
+						"Identifiant OddsPapi de l'événement.",
+					),
+
 				bookmakers: z
 					.string()
 					.optional()
 					.describe(
-						"Maximum 3 bookmakers séparés par des virgules. Par défaut winamax.fr,pinnacle."
+						"Bookmakers à comparer. Par défaut : winamax.fr,pinnacle.",
 					),
 			}),
 		},
 		async ({ fixtureId, bookmakers }) => {
-			const data = await oddsPapi(env, "historical-odds", {
-				fixtureId,
-				bookmakers: bookmakers || "winamax.fr,pinnacle",
-			});
+			const data = await oddsPapi(
+				env,
+				"historical-odds",
+				{
+					fixtureId,
+					bookmakers:
+						bookmakers ||
+						"winamax.fr,pinnacle",
+				},
+			);
 
 			return asText(data);
 		},
@@ -183,9 +238,25 @@ function createServer(env: Env) {
 	return server;
 }
 
+/*
+ * CLOUDFLARE MCP HANDLER
+ */
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
-		const handler = createMcpHandler(() => createServer(env));
-		return handler(request, env, ctx);
+	fetch(
+		request: Request,
+		env: Env,
+		ctx: ExecutionContext,
+	) {
+		const handler = createMcpHandler(
+			() => createServer(env),
+		);
+
+		return handler(
+			request,
+			env,
+			ctx,
+		);
 	},
 } satisfies ExportedHandler<Env>;
+
+// Trigger Cloudflare deployment
