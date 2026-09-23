@@ -1,262 +1,219 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
+import { OddsClient, Scanner, ProviderError, fixtureView, type Env } from "./odds";
 
-interface Env {
-	ODDSPAPI_API_KEY: string;
-	PULSESCORE_API_KEY: string;
+const clients = new WeakMap<object, OddsClient>();
+
+function clientFor(env: Env) {
+  let client = clients.get(env);
+  if (!client) {
+    client = new OddsClient(env);
+    clients.set(env, client);
+  }
+  return client;
 }
 
-const ODDS_BASE = "https://api.oddspapi.io/v4";
+const common = {
+  minOdds: z.number().gt(1).default(1.4).describe("Cote Winamax minimum, incluse."),
+  maxOdds: z.number().gt(1).default(2).describe("Cote Winamax maximum, incluse."),
 
-async function oddsPapi(
-	env: Env,
-	endpoint: string,
-	params: Record<string, string> = {},
-) {
-	const url = new URL(`${ODDS_BASE}/${endpoint}`);
+  includeInactive: z
+    .boolean()
+    .default(false)
+    .describe("Inclure les cotes suspendues/inactives, explicitement signalées."),
 
-	url.searchParams.set("apiKey", env.ODDSPAPI_API_KEY);
+  marketName: z
+    .string()
+    .max(150)
+    .optional()
+    .describe("Filtre textuel sur le nom du marché."),
 
-	for (const [key, value] of Object.entries(params)) {
-		if (value !== undefined && value !== "") {
-			url.searchParams.set(key, value);
-		}
-	}
+  selectionName: z
+    .string()
+    .max(150)
+    .optional()
+    .describe("Filtre textuel sur la sélection/joueur/équipe."),
 
-	const response = await fetch(url.toString());
+  bookmakers: z
+    .string()
+    .max(500)
+    .regex(/^(all|[a-zA-Z0-9._-]+(?:,[a-zA-Z0-9._-]+)*)$/)
+    .optional()
+    .describe(
+      "Comparaison: tous disponibles par défaut; ou liste séparée par virgules. Winamax et Pinnacle toujours demandés. Historique: Winamax/Pinnacle par défaut; all pour tous.",
+    ),
 
-	if (!response.ok) {
-		const error = await response.text();
+  language: z.enum(["en", "fr"]).default("en"),
 
-		throw new Error(
-			`OddsPapi ${response.status}: ${error.slice(0, 500)}`,
-		);
-	}
+  timezone: z
+    .string()
+    .refine((v) => {
+      try {
+        new Intl.DateTimeFormat("fr", { timeZone: v });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "Fuseau IANA invalide")
+    .default("Europe/Paris"),
 
-	return response.json();
+  includeHistory: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Ajouter ouverture enregistrée → cote actuelle. Plus lent et consomme davantage de requêtes.",
+    ),
+
+  offset: z.number().int().min(0).default(0),
+};
+
+function reply(data: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+  };
 }
 
-function asText(data: unknown) {
-	return {
-		content: [
-			{
-				type: "text" as const,
-				text: JSON.stringify(data, null, 2),
-			},
-		],
-	};
+async function safely(fn: () => Promise<unknown>) {
+  try {
+    return reply(await fn());
+  } catch (e) {
+    return {
+      ...reply({
+        error:
+          e instanceof ProviderError
+            ? e.message
+            : "Impossible de traiter la réponse du fournisseur.",
+        retrievedAt: new Date().toISOString(),
+      }),
+      isError: true,
+    };
+  }
 }
 
-function createServer(env: Env) {
-	const server = new McpServer({
-		name: "Winamax Odds Scanner",
-		version: "1.0.0",
-	});
+export function createServer(env: Env) {
+  const client = clientFor(env);
+  const scanner = new Scanner(client);
 
-	/*
-	 * TEST ODDS PAPI
-	 */
-	server.registerTool(
-		"test_oddspapi",
-		{
-			description:
-				"Teste la connexion à OddsPapi sans révéler la clé API.",
-			inputSchema: z.object({}),
-		},
-		async () => {
-			const data: any = await oddsPapi(env, "account");
+  const server = new McpServer({
+    name: "Winamax Odds Scanner",
+    version: "2.0.0",
+  });
 
-			if (data && typeof data === "object") {
-				delete data.apiKey;
-				delete data.api_key;
-			}
+  server.registerTool(
+    "test_oddspapi",
+    {
+      description:
+        "Teste la connexion sans retourner de secret ni de données personnelles du compte.",
+      inputSchema: z.object({}),
+    },
+    async () =>
+      safely(async () => {
+        const data = await client.get("account");
 
-			return asText(data);
-		},
-	);
+        return {
+          connected: true,
+          retrievedAt: new Date().toISOString(),
+          subscriptions: (data.subscriptions ?? []).map((s: any) => ({
+            active: s.is_active,
+            plan: s.plan,
+            requestCount: s.request_count,
+            requestLimit: s.request_limit,
+            winamaxAvailable: !!s.bookmakers?.["winamax.fr"],
+            pinnacleAvailable: !!s.bookmakers?.pinnacle,
+          })),
+        };
+      }),
+  );
 
-	/*
-	 * RECHERCHE DES EVENEMENTS WINAMAX
-	 */
-	server.registerTool(
-		"search_winamax_events",
-		{
-			description:
-				"Recherche les événements sportifs pré-match disposant de cotes chez Winamax France.",
+  server.registerTool(
+    "search_winamax_events",
+    {
+      description:
+        "Catalogue réel Winamax pré-match avec sport, pays/catégorie, compétition, participants et heures UTC/locales. includeMarkets=true ajoute sélections libellées, filtrées 1,40–2,00, et comparaisons. Pagination explicite; suivre nextOffset.",
 
-			inputSchema: z.object({
-				from: z
-					.string()
-					.describe(
-						"Date/heure ISO UTC de début, par exemple 2026-09-23T08:00:00Z",
-					),
+      inputSchema: z.object({
+        ...common,
+        from: z.iso.datetime({ offset: true }),
+        to: z.iso.datetime({ offset: true }),
+        sportId: z.number().int().optional(),
+        sportName: z.string().optional(),
+        includeMarkets: z.boolean().default(false),
+        limit: z.number().int().min(1).max(20).default(20),
+      }),
+    },
+    async (args) => safely(() => scanner.search(args)),
+  );
 
-				to: z
-					.string()
-					.describe(
-						"Date/heure ISO UTC de fin. Utiliser une fenêtre inférieure à 48 heures.",
-					),
+  server.registerTool(
+    "get_winamax_odds",
+    {
+      description:
+        "Sélections Winamax lisibles et actives entre minOdds=1.40 et maxOdds=2.00, libellés OddsPapi, lignes, timestamps et comparaison exacte avec Pinnacle/autres bookmakers. includeHistory ajoute les mouvements. Suivre nextOffset.",
 
-				sportId: z
-					.number()
-					.optional()
-					.describe(
-						"Identifiant OddsPapi du sport. Facultatif.",
-					),
-			}),
-		},
-		async ({ from, to, sportId }) => {
-			const params: Record<string, string> = {
-				from,
-				to,
-				statusId: "0",
-				hasOdds: "true",
-				bookmakers: "winamax.fr",
-				language: "en",
-			};
+      inputSchema: z.object({
+        ...common,
+        fixtureId: z.string().min(1),
+        limit: z.number().int().min(1).max(500).default(100),
+      }),
+    },
+    async ({ fixtureId, ...options }) =>
+      safely(() => scanner.odds(fixtureId, options)),
+  );
 
-			if (sportId !== undefined) {
-				params.sportId = String(sportId);
-			}
+  server.registerTool(
+    "get_fixture",
+    {
+      description:
+        "Détails lisibles d'un événement OddsPapi, horaires et statut pré-match.",
 
-			const data = await oddsPapi(
-				env,
-				"fixtures",
-				params,
-			);
+      inputSchema: z.object({
+        fixtureId: z.string().min(1),
+        language: common.language,
+        timezone: common.timezone,
+      }),
+    },
+    async ({ fixtureId, language, timezone }) =>
+      safely(async () => ({
+        retrievedAt: new Date().toISOString(),
+        fixture: fixtureView(
+          await client.get("fixture", { fixtureId, language }),
+          timezone,
+        ),
+      })),
+  );
 
-			return asText(data);
-		},
-	);
+  server.registerTool(
+    "get_odds_history",
+    {
+      description:
+        "Historique libellé des sélections Winamax: première cote active enregistrée → actuelle, derniers points, variation et comparaisons. Filtre Winamax 1,40–2,00 par défaut. RLM non déterminable sans répartition des mises. Historique Winamax/Pinnacle par défaut, bookmakers=all pour tous (plus lent).",
 
-	/*
-	 * COTES WINAMAX
-	 */
-	server.registerTool(
-		"get_winamax_odds",
-		{
-			description:
-				"Récupère les marchés et les cotes actuelles Winamax France pour un événement OddsPapi.",
+      inputSchema: z.object({
+        ...common,
+        fixtureId: z.string().min(1),
+        includePoints: z.boolean().default(false),
+        limit: z.number().int().min(1).max(500).default(100),
+      }),
+    },
+    async ({ fixtureId, ...options }) =>
+      safely(() =>
+        scanner.odds(fixtureId, {
+          ...options,
+          includeHistory: true,
+        }),
+      ),
+  );
 
-			inputSchema: z.object({
-				fixtureId: z
-					.string()
-					.describe(
-						"Identifiant OddsPapi de l'événement.",
-					),
-			}),
-		},
-		async ({ fixtureId }) => {
-			const data = await oddsPapi(
-				env,
-				"odds",
-				{
-					fixtureId,
-					bookmakers: "winamax.fr",
-					oddsFormat: "decimal",
-					language: "en",
-					verbosity: "3",
-				},
-			);
-
-			return asText(data);
-		},
-	);
-
-	/*
-	 * DETAILS D'UN EVENEMENT
-	 */
-	server.registerTool(
-		"get_fixture",
-		{
-			description:
-				"Récupère les informations détaillées concernant un événement sportif OddsPapi.",
-
-			inputSchema: z.object({
-				fixtureId: z
-					.string()
-					.describe(
-						"Identifiant OddsPapi de l'événement.",
-					),
-			}),
-		},
-		async ({ fixtureId }) => {
-			const data = await oddsPapi(
-				env,
-				"fixture",
-				{
-					fixtureId,
-					language: "en",
-				},
-			);
-
-			return asText(data);
-		},
-	);
-
-	/*
-	 * HISTORIQUE DES COTES / RLM
-	 */
-	server.registerTool(
-		"get_odds_history",
-		{
-			description:
-				"Récupère l'historique des mouvements de cotes afin d'analyser le line movement et les éventuels signaux RLM.",
-
-			inputSchema: z.object({
-				fixtureId: z
-					.string()
-					.describe(
-						"Identifiant OddsPapi de l'événement.",
-					),
-
-				bookmakers: z
-					.string()
-					.optional()
-					.describe(
-						"Bookmakers à comparer. Par défaut : winamax.fr,pinnacle.",
-					),
-			}),
-		},
-		async ({ fixtureId, bookmakers }) => {
-			const data = await oddsPapi(
-				env,
-				"historical-odds",
-				{
-					fixtureId,
-					bookmakers:
-						bookmakers ||
-						"winamax.fr,pinnacle",
-				},
-			);
-
-			return asText(data);
-		},
-	);
-
-	return server;
+  return server;
 }
 
-/*
- * CLOUDFLARE MCP HANDLER
- */
 export default {
-	fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext,
-	) {
-		const handler = createMcpHandler(
-			() => createServer(env),
-		);
-
-		return handler(
-			request,
-			env,
-			ctx,
-		);
-	},
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return createMcpHandler(() => createServer(env))(
+      request,
+      env,
+      ctx,
+    );
+  },
 } satisfies ExportedHandler<Env>;
-
-// Trigger Cloudflare deployment
