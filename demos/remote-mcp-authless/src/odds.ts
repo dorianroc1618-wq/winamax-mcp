@@ -99,16 +99,18 @@ export class OddsClient {
 
           let response: Response;
 
-          try {
-            // Cloudflare Worker:
-            // use a plain string URL and let the Worker runtime
-            // manage the outbound request.
-            response = await this.request(url.toString());
-          } catch {
-            throw new ProviderError(
-              `OddsPapi ${endpoint}: connexion indisponible.`,
-            );
-          }
+        try {
+  response = await this.request(url.toString());
+} catch (error) {
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  throw new ProviderError(
+    `OddsPapi ${endpoint}: erreur fetch: ${message}`,
+  );
+}
 
           this.next.set(
             endpoint,
