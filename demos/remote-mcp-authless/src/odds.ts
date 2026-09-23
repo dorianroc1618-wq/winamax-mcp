@@ -53,10 +53,7 @@ export class OddsClient {
     }
   >();
 
-  constructor(
-    private env: Env,
-    private request: typeof fetch = fetch,
-  ) {}
+  constructor(private env: Env) {}
 
   async get(
     endpoint: string,
@@ -99,27 +96,31 @@ export class OddsClient {
 
           let response: Response;
 
-        try {
-  response = await this.request(url.toString());
-} catch (error) {
-  const message =
-    error instanceof Error
-      ? error.message
-      : String(error);
+          try {
+            // IMPORTANT:
+            // Call Cloudflare's native fetch directly.
+            // Do not store fetch as an instance method because
+            // Cloudflare requires the correct native `this` binding.
+            response = await fetch(url.toString());
+          } catch (error) {
+            const message =
+              error instanceof Error
+                ? error.message
+                : String(error);
 
-  throw new ProviderError(
-    `OddsPapi ${endpoint}: erreur fetch: ${message}`,
-  );
-}
+            throw new ProviderError(
+              `OddsPapi ${endpoint}: erreur fetch: ${message}`,
+            );
+          }
 
           this.next.set(
             endpoint,
             Date.now() + (cooldown[endpoint] ?? 1050),
           );
 
-          // ---------------------------
-          // Rate limit
-          // ---------------------------
+          // --------------------------------------------------
+          // RATE LIMIT
+          // --------------------------------------------------
 
           if (response.status === 429) {
             if (attempt >= 2) {
@@ -132,9 +133,7 @@ export class OddsClient {
               .json()
               .catch(() => ({}));
 
-            const retryMs = Number(
-              data?.error?.retryMs,
-            );
+            const retryMs = Number(data?.error?.retryMs);
 
             const retryHeader = Number(
               response.headers.get("Retry-After"),
@@ -162,7 +161,7 @@ export class OddsClient {
             continue;
           }
 
-          // Do not expose provider response bodies or URLs.
+          // Never expose provider response bodies or URLs.
           // They may contain credentials or sensitive data.
           if (!response.ok) {
             throw new ProviderError(
@@ -226,9 +225,7 @@ export class OddsClient {
       this.metadata.set(key, cached);
 
       value.catch(() => {
-        if (
-          this.metadata.get(key)?.value === value
-        ) {
+        if (this.metadata.get(key)?.value === value) {
           this.metadata.delete(key);
         }
       });
@@ -244,9 +241,7 @@ export class OddsClient {
 
 let countryNames: Set<string> | undefined;
 
-function countryFromCategory(
-  f: Dict,
-): string | null {
+function countryFromCategory(f: Dict): string | null {
   if (f.countryName) {
     return f.countryName;
   }
@@ -266,27 +261,18 @@ function countryFromCategory(
     ]);
 
     for (const language of ["en", "fr"]) {
-      const names = new Intl.DisplayNames(
-        [language],
-        {
-          type: "region",
-          fallback: "none",
-        },
-      );
+      const names = new Intl.DisplayNames([language], {
+        type: "region",
+        fallback: "none",
+      });
 
       for (let a = 65; a <= 90; a++) {
         for (let b = 65; b <= 90; b++) {
-          const code = String.fromCharCode(
-            a,
-            b,
-          );
-
+          const code = String.fromCharCode(a, b);
           const name = names.of(code);
 
           if (name) {
-            countryNames.add(
-              name.toLowerCase(),
-            );
+            countryNames.add(name.toLowerCase());
           }
         }
       }
@@ -310,9 +296,7 @@ export function fixtureView(
 ) {
   const date = new Date(f.startTime);
 
-  const local = Number.isFinite(
-    date.getTime(),
-  )
+  const local = Number.isFinite(date.getTime())
     ? new Intl.DateTimeFormat("fr-FR", {
         timeZone: timezone,
         dateStyle: "short",
@@ -322,7 +306,6 @@ export function fixtureView(
 
   return {
     fixtureId: f.fixtureId,
-
     sportId: f.sportId,
     sport: f.sportName ?? null,
 
@@ -349,7 +332,8 @@ export function fixtureView(
     startTime:
       f.startTime ?? null,
 
-    startTimeLocal: local,
+    startTimeLocal:
+      local,
 
     timezone,
 
@@ -397,7 +381,8 @@ function quote(
   }
 
   return {
-    price: player.price,
+    price:
+      player.price,
 
     timestamp:
       player.changedAt ?? null,
@@ -443,9 +428,7 @@ export function historyView(
   const sorted = (points ?? [])
     .filter(
       (p) =>
-        Number.isFinite(
-          Date.parse(p.createdAt),
-        ) &&
+        Number.isFinite(Date.parse(p.createdAt)) &&
         typeof p.price === "number" &&
         Number.isFinite(p.price) &&
         p.price > 1,
@@ -467,20 +450,16 @@ export function historyView(
   const first = opening
     ? {
         price: opening.price,
-        timestamp:
-          opening.createdAt,
-        active:
-          opening.active,
+        timestamp: opening.createdAt,
+        active: opening.active,
       }
     : null;
 
   const latest = last
     ? {
         price: last.price,
-        timestamp:
-          last.createdAt,
-        active:
-          last.active,
+        timestamp: last.createdAt,
+        active: last.active,
       }
     : null;
 
@@ -495,23 +474,26 @@ export function historyView(
     openingDefinition:
       "first_recorded_active_quote_not_guaranteed_bookmaker_opening",
 
-    latestRecorded: latest,
+    latestRecorded:
+      latest,
 
     current,
 
-    priceChange: delta,
+    priceChange:
+      delta,
 
     priceChangePercent:
       delta !== null && first
-        ? (100 * delta) /
-          first.price
+        ? (100 * delta) / first.price
         : null,
 
     impliedProbabilityChangePoints:
       first && current?.available
         ? 100 *
-          (1 / current.price -
-            1 / first.price)
+          (
+            1 / current.price -
+            1 / first.price
+          )
         : null,
 
     direction:
@@ -523,19 +505,16 @@ export function historyView(
             ? "shortening"
             : "stable",
 
-    pointCount: sorted.length,
+    pointCount:
+      sorted.length,
 
     ...(includePoints
       ? {
-          points: sorted.map(
-            (p) => ({
-              price: p.price,
-              timestamp:
-                p.createdAt,
-              active:
-                p.active,
-            }),
-          ),
+          points: sorted.map((p) => ({
+            price: p.price,
+            timestamp: p.createdAt,
+            active: p.active,
+          })),
         }
       : {}),
   };
@@ -631,12 +610,13 @@ export function normalizeOdds(
           outcome.players ?? {},
         )
       ) {
-        const winamax = quote(
-          winamaxBook,
-          marketId,
-          outcomeId,
-          playerId,
-        );
+        const winamax =
+          quote(
+            winamaxBook,
+            marketId,
+            outcomeId,
+            playerId,
+          );
 
         if (
           !winamax ||
@@ -677,8 +657,7 @@ export function normalizeOdds(
           !meta.marketName
             .toLowerCase()
             .includes(
-              options.marketName
-                .toLowerCase(),
+              options.marketName.toLowerCase(),
             )
         ) {
           continue;
@@ -689,23 +668,21 @@ export function normalizeOdds(
           !selection
             ?.toLowerCase()
             .includes(
-              options.selectionName
-                .toLowerCase(),
+              options.selectionName.toLowerCase(),
             )
         ) {
           continue;
         }
 
-        // --------------------------------
-        // Other bookmaker comparisons
-        // --------------------------------
+        // ----------------------------------------------------
+        // BOOKMAKER COMPARISONS
+        // ----------------------------------------------------
 
         const comparisons =
           Object.entries(books)
             .filter(
               ([bookmaker]) =>
-                bookmaker !==
-                WINAMAX,
+                bookmaker !== WINAMAX,
             )
             .flatMap(
               ([bookmaker, book]) => {
@@ -728,8 +705,7 @@ export function normalizeOdds(
                     winamaxPriceDifference:
                       winamax.available &&
                       q.available
-                        ? winamax.price -
-                          q.price
+                        ? winamax.price - q.price
                         : null,
 
                     winamaxPriceAdvantagePercent:
@@ -747,9 +723,9 @@ export function normalizeOdds(
               },
             );
 
-        // --------------------------------
-        // History
-        // --------------------------------
+        // ----------------------------------------------------
+        // HISTORY
+        // ----------------------------------------------------
 
         const historyBooks =
           history
@@ -757,8 +733,7 @@ export function normalizeOdds(
                 ...new Set([
                   WINAMAX,
                   ...Object.keys(
-                    history.bookmakers ??
-                      {},
+                    history.bookmakers ?? {},
                   ),
                 ]),
               ]
@@ -823,8 +798,7 @@ export function normalizeOdds(
 
           ...(history
             ? {
-                movement:
-                  movements,
+                movement: movements,
               }
             : {}),
         });
@@ -851,7 +825,8 @@ export function normalizeOdds(
     options.limit ?? 100;
 
   return {
-    schemaVersion: "2.0",
+    schemaVersion:
+      "2.0",
 
     retrievedAt:
       new Date().toISOString(),
@@ -866,8 +841,7 @@ export function normalizeOdds(
       minOdds: min,
       maxOdds: max,
       includeInactive:
-        options.includeInactive ??
-        false,
+        options.includeInactive ?? false,
     },
 
     availableBookmakers:
@@ -879,8 +853,7 @@ export function normalizeOdds(
     offset,
 
     nextOffset:
-      offset + limit <
-      rows.length
+      offset + limit < rows.length
         ? offset + limit
         : null,
 
@@ -950,10 +923,7 @@ export class Scanner {
 
               ...options.bookmakers
                 .split(",")
-                .map(
-                  (s) =>
-                    s.trim(),
-                )
+                .map((s) => s.trim())
                 .filter(Boolean),
             ]),
           ].join(",")
@@ -973,10 +943,8 @@ export class Scanner {
           fixtureId,
           language,
           verbosity: "3",
-          oddsFormat:
-            "decimal",
-          bookmakers:
-            bookList,
+          oddsFormat: "decimal",
+          bookmakers: bookList,
         },
       );
 
@@ -992,19 +960,15 @@ export class Scanner {
     // HISTORY
     // ========================================================
 
-    if (
-      options.includeHistory
-    ) {
+    if (options.includeHistory) {
       history = {
         bookmakers: {},
       };
 
       const requested =
-        options.bookmakers ===
-        "all"
+        options.bookmakers === "all"
           ? Object.keys(
-              f.bookmakerOdds ??
-                {},
+              f.bookmakerOdds ?? {},
             )
           : [
               ...new Set([
@@ -1014,13 +978,8 @@ export class Scanner {
                 ...(
                   options.bookmakers
                     ?.split(",")
-                    .map(
-                      (s) =>
-                        s.trim(),
-                    )
-                    .filter(
-                      Boolean,
-                    ) ?? []
+                    .map((s) => s.trim())
+                    .filter(Boolean) ?? []
                 ),
               ]),
             ];
@@ -1028,13 +987,11 @@ export class Scanner {
       const groups =
         requested.filter(
           (bookmaker) =>
-            f.bookmakerOdds?.[
-              bookmaker
-            ],
+            f.bookmakerOdds?.[bookmaker],
         );
 
-      // Historical endpoint:
-      // maximum 3 bookmakers per call.
+      // OddsPapi historical endpoint:
+      // maximum 3 bookmakers per request.
       for (
         let i = 0;
         i < groups.length;
@@ -1049,10 +1006,7 @@ export class Scanner {
 
                 bookmakers:
                   groups
-                    .slice(
-                      i,
-                      i + 3,
-                    )
+                    .slice(i, i + 3)
                     .join(","),
               },
             );
@@ -1063,8 +1017,7 @@ export class Scanner {
           );
         } catch (e) {
           historyError =
-            e instanceof
-            ProviderError
+            e instanceof ProviderError
               ? e.message
               : "Historique indisponible.";
 
@@ -1122,8 +1075,7 @@ export class Scanner {
       !Number.isFinite(from) ||
       !Number.isFinite(to) ||
       to <= from ||
-      to - from >=
-        48 * 3600000
+      to - from >= 48 * 3600000
     ) {
       throw new ProviderError(
         "Utiliser deux dates ISO avec fuseau, dans une fenêtre positive inférieure à 48 heures.",
@@ -1150,71 +1102,55 @@ export class Scanner {
             WINAMAX,
 
           language:
-            args.language ??
-            "en",
+            args.language ?? "en",
 
-          ...(args.sportId ===
-          undefined
+          ...(args.sportId === undefined
             ? {}
             : {
                 sportId:
-                  String(
-                    args.sportId,
-                  ),
+                  String(args.sportId),
               }),
         },
       );
 
-    if (
-      !Array.isArray(data)
-    ) {
+    if (!Array.isArray(data)) {
       throw new ProviderError(
         "Catalogue des événements invalide.",
       );
     }
 
-    const events = data
-      .filter(
-        (f: Dict) =>
-          f.statusId === 0 &&
-          !f.trueStartTime &&
-          Date.parse(
-            f.startTime,
-          ) > Date.now() &&
-          Date.parse(
-            f.startTime,
-          ) >= from &&
-          Date.parse(
-            f.startTime,
-          ) <= to &&
-          (
-            !args.sportName ||
-            f.sportName
-              ?.toLowerCase()
-              .includes(
-                args.sportName.toLowerCase(),
-              )
-          ),
-      )
-      .sort(
-        (
-          a: Dict,
-          b: Dict,
-        ) =>
-          Date.parse(
-            a.startTime,
-          ) -
-            Date.parse(
-              b.startTime,
-            ) ||
-          String(
-            a.fixtureId,
-          ).localeCompare(
-            String(
-              b.fixtureId,
+    const events =
+      data
+        .filter(
+          (f: Dict) =>
+            f.statusId === 0 &&
+            !f.trueStartTime &&
+            Date.parse(f.startTime) >
+              Date.now() &&
+            Date.parse(f.startTime) >=
+              from &&
+            Date.parse(f.startTime) <=
+              to &&
+            (
+              !args.sportName ||
+              f.sportName
+                ?.toLowerCase()
+                .includes(
+                  args.sportName.toLowerCase(),
+                )
             ),
-          ),
-      );
+        )
+        .sort(
+          (
+            a: Dict,
+            b: Dict,
+          ) =>
+            Date.parse(a.startTime) -
+              Date.parse(b.startTime) ||
+            String(a.fixtureId).localeCompare(
+              String(b.fixtureId),
+            ),
+        );
 
     const offset =
       args.offset ?? 0;
@@ -1232,15 +1168,11 @@ export class Scanner {
       Dict[] = [];
 
     for (const f of page) {
-      if (
-        args.includeMarkets
-      ) {
+      if (args.includeMarkets) {
         try {
           results.push(
             await this.odds(
-              String(
-                f.fixtureId,
-              ),
+              String(f.fixtureId),
               {
                 ...args,
                 offset: 0,
@@ -1257,8 +1189,7 @@ export class Scanner {
               ),
 
             error:
-              e instanceof
-              ProviderError
+              e instanceof ProviderError
                 ? e.message
                 : "Cotes indisponibles.",
           });
@@ -1292,14 +1223,12 @@ export class Scanner {
       offset,
 
       nextOffset:
-        offset + limit <
-        events.length
+        offset + limit < events.length
           ? offset + limit
           : null,
 
       includeMarkets:
-        args.includeMarkets ??
-        false,
+        args.includeMarkets ?? false,
 
       events:
         results,
