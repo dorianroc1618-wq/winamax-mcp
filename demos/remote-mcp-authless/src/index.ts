@@ -3,133 +3,34 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 import {
+  Env,
   OddsClient,
   Scanner,
   ProviderError,
-  fixtureView,
-  type Env,
 } from "./odds";
 
 // ============================================================
-// COMMON PARAMETERS
+// HELPERS
 // ============================================================
 
-const common = {
-  minOdds: z
-    .number()
-    .gt(1)
-    .default(1.4)
-    .describe(
-      "Cote Winamax minimum, incluse.",
-    ),
-
-  maxOdds: z
-    .number()
-    .gt(1)
-    .default(2)
-    .describe(
-      "Cote Winamax maximum, incluse.",
-    ),
-
-  includeInactive: z
-    .boolean()
-    .default(false)
-    .describe(
-      "Inclure les cotes suspendues/inactives, explicitement signalées.",
-    ),
-
-  marketName: z
-    .string()
-    .max(150)
-    .optional()
-    .describe(
-      "Filtre textuel sur le nom du marché.",
-    ),
-
-  selectionName: z
-    .string()
-    .max(150)
-    .optional()
-    .describe(
-      "Filtre textuel sur la sélection/joueur/équipe.",
-    ),
-
-  bookmakers: z
-    .string()
-    .max(500)
-    .regex(
-      /^(all|[a-zA-Z0-9._-]+(?:,[a-zA-Z0-9._-]+)*)$/,
-    )
-    .optional()
-    .describe(
-      "Comparaison: tous disponibles par défaut; ou liste séparée par virgules. Winamax et Pinnacle toujours demandés. Historique: Winamax/Pinnacle par défaut; all pour tous.",
-    ),
-
-  language: z
-    .enum(["en", "fr"])
-    .default("en"),
-
-  timezone: z
-    .string()
-    .refine(
-      (value) => {
-        try {
-          new Intl.DateTimeFormat(
-            "fr",
-            {
-              timeZone: value,
-            },
-          );
-
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      "Fuseau IANA invalide",
-    )
-    .default("Europe/Paris"),
-
-  includeHistory: z
-    .boolean()
-    .default(false)
-    .describe(
-      "Ajouter ouverture enregistrée → cote actuelle. Plus lent et consomme davantage de requêtes.",
-    ),
-
-  offset: z
-    .number()
-    .int()
-    .min(0)
-    .default(0),
-};
-
-// ============================================================
-// MCP RESPONSE
-// ============================================================
-
-function reply(data: unknown) {
+function jsonText(data: unknown) {
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(data),
+        text: JSON.stringify(data, null, 2),
       },
     ],
   };
 }
 
-// ============================================================
-// ERROR HANDLING
-// ============================================================
-
 async function safely(
-  fn: () => Promise<unknown>,
+  action: () => Promise<unknown>,
 ) {
   try {
-    const data = await fn();
+    const result = await action();
 
-    return reply(data);
+    return jsonText(result);
   } catch (error) {
     const message =
       error instanceof ProviderError
@@ -139,13 +40,13 @@ async function safely(
           : String(error);
 
     return {
-      ...reply({
-        error: message,
-        retrievedAt:
-          new Date().toISOString(),
-      }),
-
       isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text: message,
+        },
+      ],
     };
   }
 }
@@ -154,139 +55,123 @@ async function safely(
 // CREATE MCP SERVER
 // ============================================================
 
-export function createServer(
-  env: Env,
-) {
-  // Deliberately create a fresh client for the MCP server.
-  // No global WeakMap/cache around the environment.
-  const client =
-    new OddsClient(env);
+function createServer(env: Env) {
+  const server = new McpServer({
+    name: "Winamax MCP",
+    version: "2.0.2",
+  });
 
-  const scanner =
-    new Scanner(client);
-
-  const server =
-    new McpServer({
-      name:
-        "Winamax Odds Scanner",
-
-      version:
-        "2.0.1",
-    });
+  const client = new OddsClient(env);
+  const scanner = new Scanner(client);
 
   // ==========================================================
-  // TEST ODDSPAPI
+  // TOOL 1 — TEST ODDSPAPI
   // ==========================================================
 
-  server.registerTool(
+  server.tool(
     "test_oddspapi",
-
-    {
-      description:
-        "Teste directement la connexion à OddsPapi sans retourner de secret ni de données personnelles du compte.",
-
-      inputSchema:
-        z.object({}),
-    },
-
+    "Teste la connexion entre le Worker Cloudflare et OddsPapi.",
+    {},
     async () =>
       safely(async () => {
-        const data =
-          await client.get(
-            "account",
-          );
+        const account =
+          await client.get("account");
 
         return {
-          connected: true,
-
-          retrievedAt:
-            new Date().toISOString(),
-
-          subscriptions:
-            (
-              data.subscriptions ??
-              []
-            ).map(
-              (subscription: any) => ({
-                active:
-                  subscription.is_active,
-
-                plan:
-                  subscription.plan,
-
-                requestCount:
-                  subscription.request_count,
-
-                requestLimit:
-                  subscription.request_limit,
-
-                winamaxAvailable:
-                  !!subscription
-                    .bookmakers?.[
-                    "winamax.fr"
-                  ],
-
-                pinnacleAvailable:
-                  !!subscription
-                    .bookmakers
-                    ?.pinnacle,
-              }),
-            ),
+          success: true,
+          provider: "OddsPapi",
+          message:
+            "Connexion OddsPapi réussie.",
+          account,
         };
       }),
   );
 
   // ==========================================================
-  // SEARCH WINAMAX EVENTS
+  // TOOL 2 — SEARCH WINAMAX EVENTS
   // ==========================================================
 
-  server.registerTool(
+  server.tool(
     "search_winamax_events",
-
+    "Recherche les événements prématch réellement présents chez Winamax France.",
     {
-      description:
-        "Catalogue réel Winamax pré-match avec sport, pays/catégorie, compétition, participants et heures UTC/locales. includeMarkets=true ajoute les sélections libellées, filtrées selon minOdds/maxOdds, ainsi que les comparaisons. Pagination explicite avec nextOffset.",
+      from: z
+        .string()
+        .describe(
+          "Date ISO de début avec fuseau.",
+        ),
 
-      inputSchema:
-        z.object({
-          ...common,
+      to: z
+        .string()
+        .describe(
+          "Date ISO de fin avec fuseau. Fenêtre inférieure à 48 heures.",
+        ),
 
-          from:
-            z.iso.datetime({
-              offset: true,
-            }),
+      sportId: z
+        .number()
+        .optional(),
 
-          to:
-            z.iso.datetime({
-              offset: true,
-            }),
+      sportName: z
+        .string()
+        .optional(),
 
-          sportId:
-            z
-              .number()
-              .int()
-              .optional(),
+      includeMarkets: z
+        .boolean()
+        .optional(),
 
-          sportName:
-            z
-              .string()
-              .optional(),
+      minOdds: z
+        .number()
+        .optional(),
 
-          includeMarkets:
-            z
-              .boolean()
-              .default(false),
+      maxOdds: z
+        .number()
+        .optional(),
 
-          limit:
-            z
-              .number()
-              .int()
-              .min(1)
-              .max(20)
-              .default(20),
-        }),
+      includeInactive: z
+        .boolean()
+        .optional(),
+
+      marketName: z
+        .string()
+        .optional(),
+
+      selectionName: z
+        .string()
+        .optional(),
+
+      bookmakers: z
+        .string()
+        .optional(),
+
+      language: z
+        .string()
+        .optional(),
+
+      timezone: z
+        .string()
+        .optional(),
+
+      includeHistory: z
+        .boolean()
+        .optional(),
+
+      includePoints: z
+        .boolean()
+        .optional(),
+
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional(),
+
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional(),
     },
-
     async (args) =>
       safely(() =>
         scanner.search(args),
@@ -294,35 +179,68 @@ export function createServer(
   );
 
   // ==========================================================
-  // GET WINAMAX ODDS
+  // TOOL 3 — GET WINAMAX ODDS
   // ==========================================================
 
-  server.registerTool(
+  server.tool(
     "get_winamax_odds",
-
+    "Récupère et normalise les marchés et cotes Winamax d'un événement.",
     {
-      description:
-        "Sélections Winamax lisibles et actives entre minOdds et maxOdds, avec libellés OddsPapi, lignes, timestamps et comparaison exacte avec Pinnacle/autres bookmakers. includeHistory ajoute les mouvements. Suivre nextOffset.",
+      fixtureId: z.string(),
 
-      inputSchema:
-        z.object({
-          ...common,
+      minOdds: z
+        .number()
+        .optional(),
 
-          fixtureId:
-            z
-              .string()
-              .min(1),
+      maxOdds: z
+        .number()
+        .optional(),
 
-          limit:
-            z
-              .number()
-              .int()
-              .min(1)
-              .max(500)
-              .default(100),
-        }),
+      includeInactive: z
+        .boolean()
+        .optional(),
+
+      marketName: z
+        .string()
+        .optional(),
+
+      selectionName: z
+        .string()
+        .optional(),
+
+      bookmakers: z
+        .string()
+        .optional(),
+
+      language: z
+        .string()
+        .optional(),
+
+      timezone: z
+        .string()
+        .optional(),
+
+      includeHistory: z
+        .boolean()
+        .optional(),
+
+      includePoints: z
+        .boolean()
+        .optional(),
+
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional(),
+
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional(),
     },
-
     async ({
       fixtureId,
       ...options
@@ -336,105 +254,61 @@ export function createServer(
   );
 
   // ==========================================================
-  // GET FIXTURE
+  // TOOL 4 — GET FIXTURE
   // ==========================================================
 
-  server.registerTool(
+  server.tool(
     "get_fixture",
-
+    "Récupère les informations brutes d'un événement OddsPapi.",
     {
-      description:
-        "Détails lisibles d'un événement OddsPapi, horaires et statut pré-match.",
+      fixtureId: z.string(),
 
-      inputSchema:
-        z.object({
-          fixtureId:
-            z
-              .string()
-              .min(1),
-
-          language:
-            common.language,
-
-          timezone:
-            common.timezone,
-        }),
+      language: z
+        .string()
+        .optional(),
     },
-
     async ({
       fixtureId,
       language,
-      timezone,
     }) =>
-      safely(async () => {
-        const fixture =
-          await client.get(
-            "fixture",
-            {
-              fixtureId,
-              language,
-            },
-          );
-
-        return {
-          retrievedAt:
-            new Date().toISOString(),
-
-          fixture:
-            fixtureView(
-              fixture,
-              timezone,
-            ),
-        };
-      }),
+      safely(() =>
+        client.get(
+          "fixtures",
+          {
+            fixtureId,
+            language:
+              language ?? "en",
+          },
+        ),
+      ),
   );
 
   // ==========================================================
-  // GET ODDS HISTORY
+  // TOOL 5 — GET ODDS HISTORY
   // ==========================================================
 
-  server.registerTool(
+  server.tool(
     "get_odds_history",
-
+    "Récupère l'historique des cotes OddsPapi pour un événement.",
     {
-      description:
-        "Historique libellé des sélections Winamax: première cote active enregistrée → actuelle, derniers points, variation et comparaisons. RLM non déterminable sans répartition des mises.",
+      fixtureId: z.string(),
 
-      inputSchema:
-        z.object({
-          ...common,
-
-          fixtureId:
-            z
-              .string()
-              .min(1),
-
-          includePoints:
-            z
-              .boolean()
-              .default(false),
-
-          limit:
-            z
-              .number()
-              .int()
-              .min(1)
-              .max(500)
-              .default(100),
-        }),
+      bookmakers: z
+        .string()
+        .optional(),
     },
-
     async ({
       fixtureId,
-      ...options
+      bookmakers,
     }) =>
       safely(() =>
-        scanner.odds(
-          fixtureId,
+        client.get(
+          "historical-odds",
           {
-            ...options,
-            includeHistory:
-              true,
+            fixtureId,
+            bookmakers:
+              bookmakers ??
+              "winamax.fr,pinnacle",
           },
         ),
       ),
@@ -448,11 +322,116 @@ export function createServer(
 // ============================================================
 
 export default {
-  fetch(
+  async fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext,
-  ) {
+  ): Promise<Response> {
+    const url = new URL(
+      request.url,
+    );
+
+    // ========================================================
+    // TEMPORARY DIRECT ODDSPAPI TEST
+    //
+    // This bypasses:
+    // - MCP
+    // - OddsClient
+    // - Scanner
+    //
+    // It tests only:
+    // Cloudflare Worker -> native fetch -> OddsPapi
+    // ========================================================
+
+    if (
+      url.pathname ===
+      "/debug-oddspapi"
+    ) {
+      if (
+        !env.ODDSPAPI_API_KEY
+      ) {
+        return Response.json(
+          {
+            test:
+              "direct-fetch",
+
+            success:
+              false,
+
+            error:
+              "ODDSPAPI_API_KEY absent du Worker.",
+          },
+          {
+            status: 500,
+          },
+        );
+      }
+
+      try {
+        const apiUrl =
+          new URL(
+            "https://api.oddspapi.io/v4/account",
+          );
+
+        apiUrl.searchParams.set(
+          "apiKey",
+          env.ODDSPAPI_API_KEY,
+        );
+
+        // Native Cloudflare fetch.
+        // No OddsClient and no detached fetch function.
+        const response =
+          await fetch(
+            apiUrl.toString(),
+          );
+
+        return Response.json({
+          test:
+            "direct-fetch",
+
+          success:
+            response.ok,
+
+          fetchWorked:
+            true,
+
+          status:
+            response.status,
+
+          ok:
+            response.ok,
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : String(error);
+
+        return Response.json(
+          {
+            test:
+              "direct-fetch",
+
+            success:
+              false,
+
+            fetchWorked:
+              false,
+
+            error:
+              message,
+          },
+          {
+            status: 500,
+          },
+        );
+      }
+    }
+
+    // ========================================================
+    // NORMAL MCP ENDPOINT
+    // ========================================================
+
     const handler =
       createMcpHandler(
         () =>
